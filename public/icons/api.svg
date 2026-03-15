@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none" stroke="#06b6d4" stroke-width="2">
+  <rect x="6" y="8" width="36" height="32" rx="4"/>
+  <line x1="6" y1="16" x2="42" y2="16"/>
+  <circle cx="12" cy="12" r="1.5" fill="#06b6d4"/>
+  <circle cx="18" cy="12" r="1.5" fill="#06b6d4"/>
+  <circle cx="24" cy="12" r="1.5" fill="#06b6d4"/>
+  <text x="24" y="30" font-family="monospace" font-size="8" fill="#06b6d4" text-anchor="middle" stroke="none">API</text>
+  <polyline points="14,34 18,30 14,26" stroke-width="1.5"/>
+  <line x1="20" y1="34" x2="28" y2="34" stroke-width="1.5"/>
+</svg>

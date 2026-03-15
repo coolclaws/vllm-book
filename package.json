@@ -1,0 +1,26 @@
+{
+  "name": "vllm-book",
+  "version": "1.0.0",
+  "description": "vLLM 源码解析 —— PagedAttention 与高吞吐量 LLM 推理引擎深度剖析",
+  "main": "index.js",
+  "scripts": {
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coolclaws/vllm-book.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/coolclaws/vllm-book/issues"
+  },
+  "homepage": "https://github.com/coolclaws/vllm-book#readme",
+  "devDependencies": {
+    "vitepress": "^1.6.4"
+  },
+  "type": "module"
+}
