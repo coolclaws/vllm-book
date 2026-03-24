@@ -56,6 +56,46 @@ vLLM 的核心创新在于将操作系统虚拟内存管理的思想引入 KV Ca
 
 在 vLLM v1 的代码中，block table 的管理分布在多个层次：`vllm/v1/core/kv_cache_manager.py` 负责逻辑层面的块分配决策，`vllm/v1/worker/block_table.py` 在 worker 端维护供 CUDA 内核使用的物理 block table 张量。
 
+下图展示了 Block Table 如何将逻辑块映射到物理块：
+
+```text
+// Block Table 查询流程：Token 位置 → KV Cache 读取
+
+Token 位置 ──▶ 逻辑块编号 = pos / block_size
+                    │
+                    ▼
+             查询 Block Table
+                    │
+                    ▼
+             获取物理块 ID
+                    │
+                    ▼
+             块内偏移 = pos % block_size
+                    │
+                    ▼
+          读取 GPU 显存中对应 KV Cache
+```
+
+下面用流程图对比传统方案和 PagedAttention 的分配方式：
+
+```text
+// 传统预分配 vs PagedAttention 按需分配 对比
+
+┌─── 传统预分配方案 ─────────────┐  ┌─── PagedAttention 按需分配 ────┐
+│                                │  │                                │
+│  请求到达                      │  │  请求到达                      │
+│    │                           │  │    │                           │
+│    ▼                           │  │    ▼                           │
+│  按 max_seq_len 预分配连续内存 │  │  仅分配 prompt 所需的物理块    │
+│    │                           │  │    │                           │
+│    ▼                           │  │    ▼                           │
+│  实际仅使用一小部分            │  │  每填满一个块，再分配新块      │
+│    │                           │  │    │                           │
+│    ▼                           │  │    ▼                           │
+│  大量内存浪费（60%~80%）       │  │  内存浪费 < 1 个块（约 4%）    │
+└────────────────────────────────┘  └────────────────────────────────┘
+```
+
 ### 按需分配
 
 与传统方案一次性预分配不同，PagedAttention 仅在当前块被填满时才分配新的物理块。一个正在解码的序列，初始只需为 prompt 分配 $\lceil \text{prompt\_len} / \text{block\_size} \rceil$ 个物理块，之后每当最后一个块写满，再追加一个新块。这将内存浪费压缩到**不超过一个块**（即最后一个块的未用部分）。
@@ -67,6 +107,32 @@ vLLM 的核心创新在于将操作系统虚拟内存管理的思想引入 KV Ca
 ## 3.4 量化收益
 
 PagedAttention 带来的内存效率提升可以量化。假设系统同时服务 N 个请求，传统方案的内存占用为 $N \times \text{max\_seq\_len} \times \text{per\_token\_kv\_size}$，而 PagedAttention 的实际占用约为 $\sum_{i=1}^{N} \lceil \text{actual\_len}_i / \text{block\_size} \rceil \times \text{block\_size} \times \text{per\_token\_kv\_size}$。论文数据显示，实际浪费率降低到 4% 以内，相比传统方案 60%~80% 的浪费率，这意味着同等显存下可以服务 **2~4 倍** 的并发请求。
+
+## 本章常见问题
+
+**Q：PagedAttention 的"页"和操作系统的虚拟内存页大小一样吗？**
+
+不一样。操作系统的页面大小通常是 4KB，而 PagedAttention 的块大小（block_size）通常是 16 个 token，实际占用的显存取决于模型维度和精度。两者的设计思想相同——通过分页消除对连续内存的依赖——但具体的粒度根据各自的场景独立设定。
+
+---
+
+**Q：block_size 的选择对性能有什么影响？**
+
+block_size 越大，每个块内的 attention 计算效率越高（更好的 GPU 内存访问局部性），但最后一个块的平均浪费也越大。block_size 越小，内存浪费少但管理开销增加。vLLM 默认值 16 是在多种模型和负载下经过实验得出的经验最优值。
+
+---
+
+**Q：PagedAttention 是否会增加 attention 计算的延迟？**
+
+理论上，非连续的物理块访问可能导致更多的 cache miss，但实际影响很小。vLLM 的自定义 CUDA kernel 针对分页访问模式做了优化（如合并内存读取），实测显示 PagedAttention 的计算开销与传统连续存储方式几乎相同。
+
+---
+
+**Q：Copy-on-Write 在什么场景下最有用？**
+
+主要用于 beam search 和 parallel sampling。当多个候选序列共享相同的前缀时，CoW 避免了重复存储。例如 beam_width=4 时，传统方案需要 4 份完整的 KV Cache，而 CoW 只需 1 份共享前缀加上各自的独立部分，内存节省接近 75%。
+
+---
 
 ## 本章小结
 

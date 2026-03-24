@@ -62,6 +62,34 @@ def _preempt_request(self, request: Request, timestamp: float) -> None:
 4. **清零计算进度**：将 `num_computed_tokens` 重置为 0
 5. **回到等待队列**：请求被放回 waiting 队列，等待重新调度
 
+下图展示了从抢占触发到恢复执行的完整流程：
+
+```text
+// 触发抢占到恢复执行的完整流程
+
+  allocate_slots() 返回 None ──▶ 显存不足！
+          │
+          ▼
+  选择受害者（FCFS 或 Priority）
+          │
+          ▼
+  ┌───────────────────────────┐
+  │ _preempt_request()        │
+  │  ├─ 释放 KV Cache         │
+  │  ├─ 重置 num_computed = 0 │
+  │  ├─ 状态 → PREEMPTED      │
+  │  └─ 放回 waiting 队列     │
+  └─────────────┬─────────────┘
+                │ ...后续轮次重新调度...
+                ▼
+       Prefix Cache 命中？
+       ┌────┴────┐
+       │是       │否
+       ▼         ▼
+  跳过已缓存   从头重算
+  仅重算剩余   全部 KV Cache
+```
+
 ## 8.5 Recompute vs Swap：两种策略的权衡
 
 在 LLM 推理系统中，处理被抢占请求有两种经典策略：
@@ -69,6 +97,22 @@ def _preempt_request(self, request: Request, timestamp: float) -> None:
 **Recompute（重计算）**：丢弃 KV Cache，下次调度时从头计算。这是 vLLM v1 当前采用的策略。优点是实现简单，不需要 CPU 内存作为中转；缺点是恢复时需要重新计算整个 prompt 的 KV Cache，对于长 prompt 来说代价较高。
 
 **Swap（换出）**：将 KV Cache 从 GPU 显存复制到 CPU 内存，恢复时再从 CPU 复制回 GPU。优点是恢复速度快（尤其对长序列），缺点是需要额外的 CPU 内存，且数据传输有开销。
+
+下面是 Recompute 与 Swap 的策略选择决策示意：
+
+```text
+// Recompute vs Swap 策略对比
+
+┌─── Recompute（v1 采用）──────┐  ┌─── Swap ────────────────────┐
+│                              │  │                              │
+│  抢占时：丢弃 KV Cache       │  │  抢占时：KV Cache → CPU 内存 │
+│  恢复时：从头计算 prompt KV  │  │  恢复时：CPU 内存 → GPU 显存 │
+│                              │  │                              │
+│  ✓ 实现简单，无需 CPU 内存   │  │  ✓ 恢复快（尤其长序列）      │
+│  ✓ 配合 Prefix Cache 高效   │  │  ✗ 需要额外 CPU 内存         │
+│  ✗ 长 prompt 重计算代价高    │  │  ✗ GPU↔CPU 数据传输有开销    │
+└──────────────────────────────┘  └──────────────────────────────┘
+```
 
 v1 架构选择 Recompute 策略有几个原因：
 
@@ -123,6 +167,32 @@ vLLM 通过 metrics 系统追踪抢占事件。每次抢占发生时，Scheduler
 - **抢占频率**：高频抢占说明显存配置过于激进
 - **请求排队时间**：过长的排队时间可能需要增加 GPU 资源
 - **有效吞吐量 vs 原始吞吐量**：差距过大说明重计算浪费严重
+
+## 本章常见问题
+
+**Q：抢占频率过高说明什么问题？如何优化？**
+
+高频抢占通常意味着 GPU 显存配置过于激进——同时运行的请求太多，或者 `gpu_memory_utilization` 设得太高。优化方向包括：降低 `max_num_running_reqs`、增大 GPU 显存（换更大的 GPU）、开启 Prefix Caching 以减少重计算开销，或使用量化降低单个 token 的 KV Cache 占用。
+
+---
+
+**Q：被抢占的请求 num_computed_tokens 重置为 0，是否意味着所有计算都白费了？**
+
+在不开启 Prefix Caching 的情况下确实如此，之前的 KV Cache 计算全部丢失。但开启 Prefix Caching 后，已经缓存的前缀块仍保留在 GPU 显存中（除非被 LRU 驱逐）。重新调度时，这些块可以被直接复用，实际需要重新计算的只是未被缓存的部分。
+
+---
+
+**Q：为什么 v1 放弃了 Swap 策略而选择 Recompute？**
+
+三个原因：一是 Prefix Caching 大幅降低了重计算的实际开销；二是 Recompute 不需要维护 GPU-CPU 块映射和 swapped 队列，架构更简洁；三是不需要预留 CPU 内存，在多 GPU 部署时减少了 CPU 侧的内存压力。
+
+---
+
+**Q：Swap 策略在什么场景下仍然有优势？**
+
+当请求的 prompt 非常长且无法命中 Prefix Cache 时，Swap 的恢复成本（GPU-CPU 数据传输）远低于 Recompute（重新计算整个 prompt 的 KV Cache）。如果系统有充足的 CPU 内存且 PCIe 带宽不是瓶颈，Swap 可能是更好的选择。
+
+---
 
 ## 本章小结
 
